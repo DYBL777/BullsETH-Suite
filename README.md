@@ -2,7 +2,7 @@
 
 **Base · BSC · Arbitrum One**
 
-A 30-draw price prediction game where players predict the ETH, BNB, or BTC price at draw resolution. The closest prediction wins. No randomness. No external yield protocol. Pure USDC.
+A 30-draw Chainlink price feed prediction game where players predict the ETH, BNB, or BTC price at draw resolution. The closest prediction wins. No randomness. No external yield protocol. Pure USDC.
 
 BullsEth is part of a new category of on-chain game where prize economics are governed autonomously rather than fixed at deployment. The Eternal Seed establishes a pot floor that rises through the active season and cannot be redistributed during play. A scheduled draw-30 bonus accumulation directs a percentage of every weekly pool toward the season finale, making it a designed economic event rather than a windfall.
 

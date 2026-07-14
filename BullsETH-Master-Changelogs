@@ -1,0 +1,707 @@
+BullsEth (NearestTheETH30\_Base) -- Master Changelog
+Fork base: NearestTheETH\_Base\_1Y v1.86 (Base Mainnet)
+Current version: v2.32
+
+\---
+
+FORK BASE: NearestTheETH\_Base\_1Y v1.86
+Inherited fixes carried into v1.0:
+M-NEW-01: registerAsWeeklyOG -- neverPlayedCommitmentCount-- moved before lastBoughtDraw=1
+L-NEW-01: stale-clear path in buyTickets now decrements neverPlayedCommitmentCount
+L-NEW-03: dead Group A guard removed
+L-01: dead v1.84 B guard removed from registerAsWeeklyOG usingPreCommitment block
+L-02: zombie double-count edge documented in NatSpec
+Inherited open item (cover letter): sweepUnclaimedPrizes permanently blocked post-AccountingDiscrepancy. Design tradeoff.
+
+\---
+
+v1.0
+Fork of NearestTheETH\_Base\_1Y v1.86. 30-draw, 72-hour cycle, 90-day season.
+Core mechanic: fixed BPS proximity bands replaced with dynamic percentage-based cutoffs.
+Keeper submits cutoff diff values after price resolves, defining top 1% (T1) and top
+\~15% (T1+T2+T3) of entries by proximity. T1 always has winners. No jackpot miss.
+Seed/rollover: 10% of weeklyPool returns to prizePot every draw.
+
+Parameter changes from 1Y:
+TOTAL\_DRAWS 52->30, DRAW\_COOLDOWN 7d->72h, PICK\_DEADLINE 4d->48h
+INHALE\_DRAWS 36->20, FINAL\_CALIBRATION\_DRAW 48->28, POST\_LOCK\_DRAWS 42->20
+WEEKLY\_OG\_QUALIFICATION\_WEEKS 51->30, MULLIGAN\_THRESHOLD 17->10
+OG\_UPFRONT\_COST $1,040->$600, ENDGAME\_SWEEP\_WINDOW 365d->180d
+RESET\_REFUND\_WINDOW 60d->30d, JP\_BPS 3667->4000, P2\_BPS 2667->3556
+
+Removed: TIER1-4\_BPS, BAND\_DENOMINATOR, JP\_MISS\_\* constants, tier1-4Band state vars,
+p4Winners array (tierPools\[4]->tierPools\[3]), InvalidTierConfiguration guard,
+JPMissRedistributed and TierNoWinners events.
+
+Added: DrawPhase.CUTOFF\_SUBMISSION, t1/t2/t3CutoffDiff state vars, snapshotTotalEntries,
+CutoffOutOfRange and InvalidCutoffOrder errors, submitCutoffDiffs() (keeper/owner),
+CutoffDiffsSubmitted event, getCutoffState() view.
+
+Draw phase flow: IDLE -> CUTOFF\_SUBMISSION -> MATCHING -> DISTRIBUTING -> FINALIZING
+
+Tier pools: T1 40% of distributable (36% of weeklyPool), T2 35.56% (32%), T3 remainder (22%).
+
+ABI CHANGE: getWinnerCounts() returns 3 values not 4.
+
+\---
+
+v1.1
+M-01: submitCutoffDiffs() verified T1 and T3 counts but not T2. Faulty keeper could zero
+T2 without triggering CutoffOutOfRange. Fix: added \_t2Count as 6th param with
+T2\_COUNT\_MIN\_BPS=600 / T2\_COUNT\_MAX\_BPS=1200. Ordering check updated.
+ABI CHANGE: submitCutoffDiffs() gains 6th param. CutoffDiffsSubmitted gains t2Count field.
+L-01: checkUpkeep returned true during CUTOFF\_SUBMISSION, burning LINK for 48h continuously.
+Fix: returns (false, "") when drawPhase == CUTOFF\_SUBMISSION.
+L-02/03: OG\_UPFRONT\_COST comment corrected. snapshotTotalEntries NatSpec ceiling risk added.
+
+\---
+
+v1.2
+HIGH-01: No post-match count verification. After matching, actual winner array sizes now
+verified against T1/T2/T3 BPS bounds. Mismatch: MatchCountMismatch event emitted,
+winner arrays cleared, cutoffs reset, phase reverts to CUTOFF\_SUBMISSION.
+tierPools preserved. OG status changes NOT automatically reversed.
+New event: MatchCountMismatch(draw, t1Actual, t12Actual, t123Actual, snapshot).
+MEDIUM-01: neverPlayedCommitmentCount not decremented at draw-1 buyTickets. p.commitmentPaid
+set false before the isFirstBuy check, so counter never fired. Fix: decrement moved
+inside usingCommitment block before p.commitmentPaid = false.
+MEDIUM-02: claimResetRefund changed to subtract net claim from totalOGPrincipal (REVERTED v1.3).
+
+\---
+
+v1.3
+DESIGN: MULLIGAN REMOVED. 90-day game at 72h cycles -- a missed window is disengagement.
+Strictness is intentional. Also eliminates the double-penalty edge case from v1.2 H-01.
+Removed: MULLIGAN\_THRESHOLD, PlayerData.mulliganUsed/mulliganQualifiedOG/mulliganUsedAtDraw,
+mulligan branch in \_processMatchesCore, mulligan unwind in \_continueUnwind.
+ABI CHANGE: getPlayerInfo() loses mulliganUsedVal -- 14 return values not 15.
+MEDIUM-02 REVERTED: totalOGPrincipal tracks gross throughout (buyTickets += gross).
+Gross consistency matters more to dormancy pro-rata than invariant purity.
+Known tradeoff: \~15% delta vs p.totalPaid per reset-claiming weekly OG.
+NS: NatSpec title updated to BullsEth. Contract name NearestTheETH30\_Base retained.
+Note: CUTOFF\_SUBMISSION requires off-chain keeper computation. Not automatable alone.
+
+\---
+
+v1.4
+NS pass. MatchCountMismatch event NatSpec removed stale mulligan reference.
+OG\_UPFRONT\_COST header comment corrected. WEEKLY\_OG\_QUALIFICATION\_WEEKS=30 NatSpec added
+(zero-miss requirement, qualification only reachable on final draw).
+
+\---
+
+v1.5
+Dynamic starting breath calibration. Single new function \_computeStartingBreath().
+Problem: fixed BREATH\_START=700 (7%) produced T3=$5-7 at draw 1 with high 2-ticket
+casual adoption (double entries without proportional pot increase).
+Fix: at startGame(), compute minimum breath for T3 >= TICKET\_PRICE from actual pregame
+state (OG count, casual count, double-ticket count).
+breath = TICKET\_PRICE \* entries \* T3\_WINNER\_BPS \* 1e8 / (pot \* 9000 \* 2444)
+Starting breath = max(OG-obligation breath, T3-floor breath), capped at breathRailMax.
+New constant: T3\_WINNER\_BPS = 700 (7%).
+ABI CHANGE: BreathCalibrated event gains 3 fields (ogBreathBps, t3FloorBps, estimatedEntriesDraw1).
+
+\---
+
+v1.51
+KEEPER TRUST MODEL section added to header. Three mitigations documented: count bounds
+verification, post-match reconciliation, getRequiredCutoffDiffBounds(). Worst-case
+scenarios section added (keeper offline, rail edge, OG miss, Aave crunch).
+\_computeStartingBreath() guard tightened: estimatedEntries==0 -> < MIN\_PLAYERS\_TO\_START.
+getRequiredCutoffDiffBounds() added: pure view returning t1/t2/t3 min/max counts and
+current snapshot. Includes 6-step keeper workflow in NatSpec.
+SolvencyAlert event added. Post-transfer balance check in claimEndgame() -- non-reverting,
+monitoring only. Gas \~2100 (one extra balanceOf SLOAD).
+
+\---
+
+v1.52
+AAVE REMOVED ENTIRELY. Rationale: yield \~$20k on $25M revenue (0.08%). Seed rollover
+is the real pot-growth engine. Removing simplifies audit, reduces gas, eliminates
+external dependency.
+Removed: IPool import, Aave errors/events/immutables/state vars, all 5 supply() calls,
+\_fullExitAave/proposeAaveExit/executeAaveExit/cancelAaveExit/activateAaveEmergency.
+Constructor loses \_aavePool and \_aUSDC params (5 params now, was 7).
+\_withdrawAndTransfer: 13-line Aave fallback -> 1 line safeTransfer.
+\_computeBalanceAndAllocated and getSolvencyStatus: dual-token balance -> USDC.balanceOf only.
+ABI CHANGE: Constructor signature changed. Deployment scripts must update.
+
+\---
+
+v1.53
+NS: Stale Aave pool address removed from header. getRequiredCutoffDiffBounds NatSpec
+documents denominator bias. \_captureYield NatSpec updated: YieldCaptured now fires
+only on direct USDC transfers to contract, not yield accrual.
+
+\---
+
+v1.54
+M-02: pruneStaleOGs now accepts owner or automationForwarder (was onlyOwner).
+Stale OGs consume MAX\_MATCH\_PER\_TX slots; automation must call each cycle.
+L-02: setAutomationForwarder now permits address(0) -- intentional kill switch during
+key compromise. Guards added against USDC and PROTOCOL\_BENEFICIARY addresses.
+L-03/04/05: getRequiredCutoffDiffBounds floors min counts at 1 for non-zero snapshot.
+Dead EXHALE\_TICKET\_PRICE branch removed. \_continueUnwind isWeeklyOG guard added.
+I-03: \_externalTransfer self-call replaced with try IERC20(USDC).transfer() directly.
+
+\---
+
+v1.55
+L-NEW-01: I-03 fix used safeTransfer inside try/catch -- does not compile (JUMP not CALL).
+Reverted to raw IERC20.transfer(). Explicit !ok check + catch provides same safety.
+L-NEW-02: setAutomationForwarder guards against USDC and PROTOCOL\_BENEFICIARY addresses.
+I-NEW-01: checkUpkeep now surfaces stale OG prune signal (action 3). New constant
+STALE\_OG\_PRUNE\_THRESHOLD=50. \_countStaleOGsInternal() caps iteration at threshold+1.
+AUTOMATION\_PRUNE\_BATCH=50 (not MAX\_LAPSE\_BATCH=500) -- fits 500k Automation gas limit.
+I-NEW-02: getCurrentPrizeRate NatSpec: returns 0 at draw 30 does NOT mean zero payout.
+Draw 30 uses surplus path. Frontend guidance added.
+
+\---
+
+v1.56
+CRITICAL: v1.55 try/safeTransfer does not compile. Reverted to try IERC20.transfer().
+MEDIUM: \_countStaleOGsInternal filter misaligned with pruneStaleOGs (had extra !isUpfrontOG
+guard). Both now use identical condition: isWeeklyOG \&\& weeklyOGStatusLost.
+LOW: \_countStaleOGsInternal independent iteration cap MAX\_STALE\_COUNT\_ITERATIONS=500.
+SEQUENCER\_FEED guard added to setAutomationForwarder.
+
+\---
+
+v1.57-P1P2
+Phase 1: INTENT QUEUE ELIMINATED.
+OG registers immediately: registerAsOG() grants isUpfrontOG=true on the spot.
+No owner action. No queue. No ratio cap. Game startable at any OG ratio.
+72-hour voluntary decline window retained (consumer protection).
+cancelOGRegistration() added: returns 90% of payment within 72h (10% treasury signal).
+Removed: confirmOGSlots, claimOGIntentRefund, sweepExpiredDeclines, forceDeclineIntent.
+Deprecated (storage layout): OGIntentStatus enum, ogIntentQueue/Head/Amount/Status.
+Phase 2: ECONOMICS OVERHAUL.
+UF\_OG\_TREASURY\_BPS=1000 (10%): upfront OGs pay 10% treasury, not 15%.
+Graduated treasury: LAUNCH\_TREASURY\_BPS\_D1\_2=500 (5% draws 1-2), D3\_4=1000 (10% draws 3-4), 15% draw 5+.
+T3 winner schedule: D1\_2=1000 (10%), D3=1111 (11.1%), D4=1250 (12.5%), D5+=1429 (14.3%).
+Return curve: targetReturnBps set at startGame(). 90% (9000 bps) at OG ratio<=20%,
+linear to 30% (3000 bps) at 100% OG. Hard floor 30%.
+\_computeTargetAndBreath() removed. \_computeTargetReturnBps() extracted as pure helper.
+closeGame: perOGPromised = OG\_UPFRONT\_COST \* targetReturnBps / 10000. Surplus to treasury.
+Key post-build fixes (rounds 1-15):
+CRITICAL: \_getT3WinnerBps() infinite recursion (final return called itself). Stack overflow
+from draw 5 onwards. Fix: returns T3\_WINNER\_BPS.
+CRITICAL: H1 dead code -- \_getDrawTreasuryBps() and \_getT3WinnerBps() never called.
+Graduated treasury and T3 schedule completely non-functional. Fix: buyTickets and
+\_computeStartingBreath() wired to both helpers.
+COMPILE: T3\_WINNER\_BPS declared twice. Duplicate functions for three P2 helpers.
+MEDIUM: cancelOGRegistration over-refund for credit users. Fixed via ogCancelRefund
+mapping storing exact net refund at registration time.
+MEDIUM: startGame called \_computeStartingBreathFromTarget before targetReturnBps was set.
+ogBreath always 165. Fixed: three-step ordering (curve -> ogBreath -> t3FloorBreath).
+MEDIUM: T3\_COUNT\_MIN/MAX\_BPS calibrated for old 7% design. New graduated schedule
+cumulative draws 1-2=18%, draw 5+=22.3%. Old MAX=1900 rejected all draw 3+ submissions.
+Recalibrated: MIN 1300->1600 (16%), MAX 1900->2500 (25%).
+MEDIUM: claimDormancyRefund used flat TREASURY\_BPS ignoring graduated rates for draw 1-2.
+Added \_getHistoricalTreasuryBps() helper. claimDormancyRefund and claimResetRefund updated.
+
+\---
+
+v1.58-P3
+GEOMETRIC BREATH ENGINE. Replaces linear step-down with 24-iteration binary search solver.
+\_solveGeometricBps(): finds max breath such that pot >= requiredEndPot after n draws.
+\_simGeomPot(): pure helper, simulates geometric decay over n draws.
+DRAW30\_PRIZE\_RESERVE=$5,000 added to requiredEndPot at all three calibration sites.
+Obligation locked at startGame() (not draw 10). ogEndgameObligation frozen immediately.
+Solvency check at startGame(): revert PotBelowTrajectory if pot cannot cover obligations
+at breathRailMin across all 30 draws. Blocks pathological deployments (70%+ OG).
+EMA update changed to 3:1 weighted blend (was 1:1). Zero-revenue draws decay toward 0.
+avgNetRevenuePerDraw seeded using committedDoubleCount (more accurate for 2-ticket casuals).
+Deprecated: BREATH\_STEP\_DOWN, BREATH\_BUFFER\_BPS, POST\_LOCK\_DRAWS, OG\_OBLIGATION\_LOCK\_DRAW.
+checkSolvency() view added: pre-flight diagnostic returning (bool solvent, uint256 deficit).
+Key fix: \_finalReturnCalibration omitted DRAW30\_PRIZE\_RESERVE from requiredEndPot. Solver
+floor dropped $5,000 at draw 28, allowing prizes to consume the draw-30 reserve. Fixed.
+
+\---
+
+v1.59
+closeGame() now uses season-average OG ratio (ogRatioBpsAccumulator / ogRatioDrawCount)
+not live draw-28 snapshot. Prevents late-game ratio spikes retroactively cutting returns.
+CRITICAL: accumulator used committedPlayerCount as denominator. It drains to 0 by draw 1,
+making the "average" identical to draw-1 ratio -- feature was a no-op. Fixed: denominator
+replaced with ogCapDenominator (frozen at startGame, never modified).
+ogRatioDrawCount now guarded by !isResetFinalize (reset draws excluded from average).
+
+\---
+
+v1.60
+POT-HEALTH-GATED EXHALE FLOOR. Unconditional exhale floor caused S12 simulation failure:
+revenue collapse + floor lock = OG shortfall of $26,862 (59% of target).
+New constant EXHALE\_FLOOR\_RELEASE\_DEFAULT=12000 (120% of requiredEndPot).
+Floor holds when pot >= threshold. Releases immediately (no timelock) on distress.
+Governance: proposeExhaleFloorRelease / executeExhaleFloorRelease / cancelExhaleFloorRelease.
+Range \[8000, 20000]. Inline release: solver takes over, shortfall near zero in S12.
+
+\---
+
+v1.61
+Draw-7 breath bump eliminated. \_calibrateBreathTarget() removed breathMultiplier write.
+Function now only updates targetReturnBps. Solver in \_checkAutoAdjust() applies correct
+breath at draw 8. Eliminates +600bps artifact in low-revenue zero-income scenarios.
+
+\---
+
+v1.62
+DRAW-30 BONUS FUND. 3% (DRAW30\_BONUS\_BPS=300) siphoned from draws 1-29 into draw30BonusFund.
+Added to draw-30 surplus. Guarantees draw 30 is largest prize event across all OG ratios 0-30%.
+draw30BonusFund returned to prizePot at activateDormancy().
+CRITICAL: draw30BonusFund missing from \_computeBalanceAndAllocated(). \_captureYield()
+computed realPot = balance - nonPotAllocated = prizePot + bonus, sweeping bonus back into
+prizePot every draw. Feature was a no-op. Fixed: bonus added to nonPotAllocated.
+Same fix applied to getSolvencyStatus().
+
+\---
+
+v1.63
+M-01: \_computeStartingBreath() denominator corrected for 87% distributable (was 90%).
+M-02: claimResetRefund() grossEquiv now uses draw-specific tRate/tRate2 not flat TREASURY\_BPS.
+L-01: proposeExhaleFloorRelease() now requires ACTIVE phase.
+getProjectedEndgamePerOG() cap corrected: OG\_UPFRONT\_COST -> OG\_UPFRONT\_COST \* targetReturnBps / 10000.
+All "guarantee" language replaced with "calibration target" throughout.
+
+\---
+
+v1.64-v1.67
+NS passes. Tier percentages corrected for 87% distributable (T1 34.8%, T2 30.9%, T3 21.3%).
+T3 winner schedule percentages corrected from \~15% to 18-22%. DRAW PHASE FLOW corrected.
+Stale mulligan and simulation references removed.
+
+\---
+
+v1.68
+MEDIUM: draw30BonusFund not rolled back on emergencyResetDraw(). Added
+currentDrawBonusContribution state var. Rolled back alongside currentDrawSeedReturn.
+Prevents double-accumulation on reset+replay.
+BreathRecalibrated newBreath renamed to computedBreath (formula estimate, not solver value).
+
+\---
+
+v1.69
+MEDIUM: currentDrawBonusContribution not cleared in \_finalizeWeekCore(). Stale draw-29
+value persisted into draw 30. Draw-30 emergency reset would add stale value to prizePot.
+Fix: cleared at both \_finalizeWeekCore() sites and in draw-30 branch of \_calculatePrizePools().
+
+\---
+
+v1.70
+Redundant currentDrawBonusContribution=0 removed from emergencyResetDraw() rollback block
+(zeroed by \_finalizeWeekCore() at end of unwind -- was dead code).
+Status: 0C/0H/0M/0L/0NS. Submission-ready.
+
+\---
+
+v1.71-v1.73
+NS passes. getProjectedEndgamePerOG() @return tags added. Stacked NatSpec block above
+getDraw30BonusStatus() split into three separate blocks.
+
+\---
+
+v1.74-v1.76
+NS passes. Full @notice pass (44 functions). Header changelog completed from v1.57-P1
+through v1.73. withdrawTreasury and getSolvencyStatus @return tags added.
+
+\---
+
+v1.77
+LOW: emergencyResetDraw() did not cancel pendingExhaleFloorReleaseTime or
+pendingEthFeedChange. A pending change could execute on the replayed draw. Both now
+cancelled (consistent with proposeDormancy()).
+
+\---
+
+v1.78-v1.82
+Four-iteration fix for commitment credit dormancy rate alignment.
+Final state (v1.82): buyTickets contribution and claimDormancyRefund claim both use
+\_getHistoricalTreasuryBps(currentDraw) for draw-1 commitment credit paths.
+Single-credit and double-credit paths now consistent. usingDoubleCredit guard added.
+@param/@return sweep: 18 external functions and 9 view functions documented.
+
+\---
+
+v1.83-v1.84
+tRate2 moved inside eligiblePool2 branch (v1.83).
+CRITICAL (v1.84): tRate2 declaration was missing after the move -- compile error. Fixed.
+
+\---
+
+v1.85
+0C/0H/0M/0L/0NS. First fully clean submission-ready version.
+
+\---
+
+v1.86
+MEDIUM: Single-credit 2-ticket draw-1 buyer had casualNetTicketTotal understated.
+Credit block added TICKET\_PRICE*95% but claim side expected cost*95% ($19.00).
+Fix: fullCostNet = cost \* (1 - drawRate) for casualNetTicketTotal. creditNet covers
+netTicketTotal only.
+NS: proposeBreathRails @notice timelock corrected 48h -> 7 days.
+
+\---
+
+v1.87-v1.92
+LOW: performUpkeep action-2 always reverted. checkUpkeep returns 32 bytes but guard
+required 96. Fix: conditional decode -- <96 bytes treated as empty list.
+tRate2 version tag corrected v1.83->v1.84. NS/IC passes throughout.
+
+\---
+
+v1.93-v1.97
+NS/IC passes. Duplicate NatSpec blocks removed. Dead-code annotations finalized
+(\_upfrontOGCapReached, \_lockOGObligation). countStaleOGs isWeeklyOG guard added.
+v1.97: All internal audit firm name references stripped from contract and changelog.
+
+\---
+
+v1.98
+MEDIUM: totalOGPrincipal += ogTransfer (not OG\_UPFRONT\_COST) in registerAsOG.
+Credit-using OGs shorted dormancyOGPool by $10-$20 per player. Fix: always += OG\_UPFRONT\_COST.
+cancelOGRegistration decrement updated to match.
+SolvencyAlert added after claimDormancyRefund transfer.
+
+\---
+
+v1.99
+CRITICAL: v1.98 claimDormancyRefund called getSolvencyStatus() internally.
+Function is external view -- compile error. Inlined the allocation check.
+SYNC comments added to getSolvencyStatus() and \_computeBalanceAndAllocated().
+
+\---
+
+v2.00-v2.04
+v2.00: B-1.99-01 credit over-allocation tradeoff documented. NS/IC sweep.
+v2.01: EMA update moved above breathOverrideLock gate -- prevents stale estimate during
+breath override cooldown. claimDormancyRefund SolvencyAlert pool set extended.
+v2.02: claimEndgame pool set extended. Constructor validates \_defaultPrediction fully.
+isResultStale: was returning true during MATCHING/DISTRIBUTING phases. Fixed with
+drawPhase guard (fix landed v2.03 -- claimed in v2.02 but code did not land).
+v2.03: isResultStale drawPhase gate applied. claimPrize SolvencyAlert pool set corrected.
+v2.04: \_continueUnwind NatSpec corrected. isResultStale @return updated.
+Status after v2.04: 0H/0M/0L/0NS.
+
+\---
+
+v2.05
+MEDIUM: closeGame() emitted GameClosed with hardcoded 0 for surplusToTreasury. Fixed:
+surplusToTreasury tracked and emitted correctly.
+MEDIUM: claimDormancyRefund() commitmentPaid cleanup fired unconditionally, destroying
+reset refund entitlement for casual-path players with active commitmentRefundPool.
+Fixed: gated on (commitmentRefundPool == 0 || block.timestamp > commitmentRefundDeadline).
+LOW: SolverDistressSignal event added -- emitted in \_solveGeometricBps() when structural
+insolvency detected. Wire keeper monitoring to this event.
+LOW: TreasuryLocked guard changed from totalOGPrincipal to requiredEndPot. totalOGPrincipal
+grows +$20/draw per active weekly OG; requiredEndPot is the correct solvency target.
+LOW: registerAsWeeklyOG() pregameOGNetContributed now includes commitment credit net.
+Fixes EMA seed understatement at startGame().
+
+\---
+
+v2.06
+CRITICAL: view modifier on \_solveGeometricBps() caused compile error (emit inside view).
+view removed. CYF-L01 carry: commitNet uses creditAmount not TICKET\_PRICE.
+
+\---
+
+v2.07
+Audit firm references stripped from contract. @return added to both treasury BPS helpers.
+
+\---
+
+v2.08
+Duplicate @return removed from treasury helpers. predictionDraw/prediction2Draw zeroed
+consistently on OG cleanup paths.
+
+\---
+
+v2.09
+0H/0M/0L/0NS/0IC. Submission-ready.
+
+\---
+
+v2.10
+LOW: proposeBreathRails used strict < for lower bound check. Should be <= (exact minimum
+is valid). Guard corrected.
+
+\---
+
+v2.11
+LOW: claimDormancyRefund trailing isWeeklyOG block was missing committedDoubleCount
+decrement. Players who used double commitment credit not correctly accounted.
+
+\---
+
+v2.12
+neverPlayedCommitmentCount dead-code path commented. 0H/0M/0L. Submission-ready.
+
+\---
+
+v2.13
+Dead-code trap documented for auditors. getWinnerCounts() IDLE-phase behaviour documented.
+emergencyResetDraw bonus rollback version tag corrected. SYNC comment enumeration corrected.
+
+\---
+
+v2.14
+\_finalizeWeekCore bonus comment corrected (end-of-draw clear, not rollback).
+OG\_OBLIGATION\_LOCK\_DRAW duplicate comment removed.
+KEEPER TRUST MODEL: mismatch-loop edge case (keeper submits bad cutoffs repeatedly,
+each pass loses OG status for miss-buy OGs) documented in contract header.
+Status: 0H/0M/0L. Final submission-ready version.
+
+\---
+
+v2.15
+DESIGN: FLAT TREASURY. Graduated rate (5%/10%/15%) removed entirely.
+Rationale: commitment payments were always 15%. Graduated active-draw rates created
+\~$1-2 asymmetry per credit player requiring documented workarounds across buyTickets,
+claimDormancyRefund, and claimResetRefund. Flat 15% eliminates all asymmetry.
+Code: 8 call sites updated to TREASURY\_BPS. drawTreasuryBps/drawRate locals removed.
+\~$1-2 tradeoff comment blocks removed. tRate/tRate2 locals removed from claimResetRefund.
+startGame() EMA seed comment corrected: seed now accurate at flat rate.
+Deprecated (ABI retained): LAUNCH\_TREASURY\_BPS\_D1\_2 (500), LAUNCH\_TREASURY\_BPS\_D3\_4 (1000).
+\_getHistoricalTreasuryBps() and \_getDrawTreasuryBps() simplified to return TREASURY\_BPS.
+
+\---
+
+v2.16
+\_getDrawTreasuryBps() mutability corrected: view -> pure (returns only a constant).
+LAUNCH\_TREASURY\_BPS\_D3\_4 gets its own @dev deprecation note (NatSpec attaches to next
+declaration only -- D1\_2 note did not cover D3\_4).
+v2.15 audit trail note: @return tags removed from simplified helpers (closed in header).
+IC: deprecated treasury helpers section header updated to "\[v2.15] Deprecated treasury helpers".
+
+\---
+
+v2.17
+NS/IC pass. withdrawTreasury @dev stale "graduated rate" reference updated to flat.
+claimDormancyRefund commitment-path comment block corrected (referenced graduated rates
+that no longer exist). \_getHistoricalTreasuryBps repositioned inside deprecated section.
+
+\---
+
+v2.18
+DESIGN: T3 WINNER SCHEDULE REDESIGNED. Fewer winners, larger per-winner prizes.
+T3\_WINNER\_BPS\_D1\_2: 1000->600 (10%->6%), D3: 1111->700, D4: 1250->800, D5+: 1429->900.
+T2 winner target reduced 7%->5% (T1+T2 cumulative 8%->6%).
+T2\_COUNT\_MIN\_BPS: 600->400. T3\_COUNT\_MIN\_BPS: 1600->1000. MAX bounds unchanged.
+Total winners per draw: \~18%/\~22% -> \~12%/\~15%.
+26 NatSpec/IC locations updated. Pool splits (40%/35.56%/remainder) unchanged.
+Breath formula unchanged (self-calibrates via \_getT3WinnerBps() at runtime).
+SAME-PRICE EDGE CASE documented: if all entries share identical diff, no valid keeper
+submission is possible. Draw sits in CUTOFF\_SUBMISSION 48h then emergencyResetDraw().
+
+\---
+
+v2.19
+Triple audit of v2.18 changes. 6 items resolved.
+NS-L-01: getRequiredCutoffDiffBounds @return t3Min/t3Max headline said "16%-50%" --
+missed location from v2.18 sweep. Contradiction with body note. Fixed to "10%-50%".
+NS-L-02: WORST-CASE SCENARIO #2 said "T3=6%" implying flat. Corrected to "T3=6-9% graduated".
+IC-L-01: \_matchAndCategorize missing cross-reference to \_getT3WinnerBps() graduation schedule.
+IC-I-01: \_calculatePrizePools T3 tier pool comment missing draw-schedule-dependent winner note.
+IC-I-02: \_computeStartingBreath \_getT3WinnerBps() call note: currentDraw=1 at startGame(),
+so returns T3\_WINNER\_BPS\_D1\_2 (600). Calibration targets draw-1 conditions (tightest pool).
+
+\---
+
+v2.20
+NS pass. Four stale "\~8%" T1+T2 cumulative references fixed to "\~6%" (T2 is 5% since v2.18;
+v2.18 sweep fixed T3 references but missed T2 cumulative).
+Locations: constants block, getCutoffState() @return, submitCutoffDiffs() @param and @dev.
+
+\---
+
+v2.21
+Full triple audit of v2.20 (change verification v2.11-v2.20 + fresh whole-contract pass).
+1L (code): predictionDraw state var not zeroed in claimSignupRefund(). Stale draw number
+persisted post-refund. Fix: predictionDraw=0 added alongside prediction=0 clear.
+3I (NS/IC): snapshotTotalEntries case 3 added (status-lost OG buys as casual = 3x snapshot
+slots). T3\_WINNER\_BPS\_D1\_2 inline comment tightened. Header WORST-CASE scenario 5
+(draw-30 emergency reset closes season on refunds, no prize distribution) added.
+
+\---
+
+v2.22
+Dead code removal pass. Functions confirmed never called in any reachable path:
+\_upfrontOGCapReached(), \_lockOGObligation() (stubs retained for audit trail, removed
+from all call sites). IC/NS annotations updated.
+
+\---
+
+v2.23
+NS/IC pass. OG\_OBLIGATION\_LOCK\_DRAW @dev updated. claimEndgame shortfall path clarified.
+Header WORST-CASE section updated for v2.21 addition.
+
+\---
+
+v2.24
+MEDIUM: cancelOGRegistration() accounting bug. totalOGPrincipal decremented by ogTransfer
+(net of credit) not OG\_UPFRONT\_COST. Asymmetry with registerAsOG which always adds
+OG\_UPFRONT\_COST. Dormancy pool undersized by $10-$20 per credit-using canceller.
+Fix: decrement changed to OG\_UPFRONT\_COST (matches increment basis).
+
+\---
+
+v2.25-v2.26
+NS/IC documentation passes. No code changes.
+v2.26: Header inline audit trail added. 80+ finding responses baked into NatSpec.
+Status: 0C/0H/0M/0L/0NS/0IC. Submission-ready.
+
+\---
+
+v2.27
+MEDIUM (D-1): Draw-30 holdback used gross ogEndgameObligation (N x $600) but closeGame()
+only pays max N x $540 (9000 bps return). $60/OG over-holdback absorbed
+DRAW30\_PRIZE\_RESERVE once N > \~83 OGs -- flagship draw-30 prize collapsed to just
+draw30BonusFund.
+Fix: holdback = ogEndgameObligation \* MAX\_TARGET\_RETURN\_BPS / 10000.
+New constant MAX\_TARGET\_RETURN\_BPS=9000 (hard ceiling of \_computeTargetReturnBps()).
+LOW (B-1): claimResetRefund() both pool paths decremented p.totalPaid by NET (claim)
+but totalOGPrincipal by GROSS (grossEquiv). \~15% residual left in p.totalPaid after
+reset refund, perturbing dormancy pro-rata.
+Fix: grossEquiv/grossEquiv2 computed before totalPaid decrement; both use GROSS basis.
+NS-1: claimEndgame() @notice "guaranteed" language removed (v1.63 language sweep missed it).
+NS-2: getProjectedEndgamePerOG() @return potHealth denominator corrected to requiredEndPot.
+IC-1: WORST-CASE SCENARIOS: draw-30 emergency reset path added (scenario 5).
+
+\---
+
+v2.28
+NS-A: v2.27 changelog entry was mis-ordered (landed after v2.20 not v2.26). Moved to
+correct chronological position.
+D-2: MAX\_TARGET\_RETURN\_BPS @dev: high-OG season holdback over-reserve documented.
+In high-OG seasons, holdback uses 9000 but actual payout is lower (e.g. 80% target =
+$540 held vs $480 paid). Unavoidable at draw-30 time; optimal for 5-20% OG regime.
+NS-B: Two "above OG obligation" summary comments updated to "above targeted OG holdback
+(MAX\_TARGET\_RETURN\_BPS)" after D-1 fix.
+IC-C: snapshotTotalEntries @dev case 3 added: status-lost OG buys as casual = 3x snapshot
+slots, 1-2 actual entries. Same overcount direction as case 2.
+
+\---
+
+v2.29
+RUNNING-AVERAGE HOLDBACK. Draw-30 holdback replaced with 29-draw running average estimate.
+Old: ogEndgameObligation \* MAX\_TARGET\_RETURN\_BPS / 10000 (always $540/OG ceiling)
+New: ogEndgameObligation \* estReturnBps / 10000 where estReturnBps =
+\_computeTargetReturnBps(ogRatioBpsAccumulator / ogRatioDrawCount).
+Eliminates over-reserve-to-treasury path in high-OG seasons.
+MAX\_TARGET\_RETURN\_BPS retained as ogRatioDrawCount==0 fallback.
+DEFECT (fixed in v2.30): Changelog incorrectly claimed ogRatioDrawCount=29 at closeGame()
+time "because \_checkAutoAdjust() does not run on draw 30." \_checkAutoAdjust() does not
+update ogRatioDrawCount -- that is \_finalizeWeekCore(). At closeGame() time in v2.29,
+ogRatioDrawCount=30, not 29. Off-by-one caused spurious EndgameShortfall in high-OG
+declining seasons ($88.50 false distress / 25 OGs).
+
+\---
+
+v2.30
+TRUE SINGLE-SOURCE-OF-TRUTH. \_finalizeWeekCore() accumulator guard adds
+\&\& currentDraw < TOTAL\_DRAWS. Draw 30's ratio excluded from ogRatioBpsAccumulator.
+ogRatioDrawCount=29 at both draw-30 resolveWeek() holdback time AND closeGame() time.
+Note: currentDraw++ runs AFTER the accumulator block in \_finalizeWeekCore(), so during
+draw 30 currentDraw==30==TOTAL\_DRAWS -- guard is false. Excluded by design.
+Spurious EndgameShortfall eliminated. Integer dust only (cents).
+v2.29 incorrect changelog reasoning corrected. closeGame() and holdback comments corrected.
+NS: getCurrentPrizeRate() @notice updated: "above the targeted OG holdback
+(MAX\_TARGET\_RETURN\_BPS)" -> "above the running-average targeted holdback".
+
+\---
+
+v2.31
+NS/IC pass. Zero bytecode change.
+NS-1: ogRatioDrawCount @dev corrected: "Typically 30" -> "Equals 29 in normal operation
+(draw 30 excluded by v2.30 SSoT guard)".
+NS-2: ogRatioBpsAccumulator @dev: "across all non-reset draws" -> "all non-reset draws
+EXCEPT draw 30 (v2.30 SSoT guard)".
+NS-3: closeGame() @dev NOTE updated to reflect draw-30 exclusion.
+NS-4: MAX\_TARGET\_RETURN\_BPS @dev re-tagged \[D-2 RESOLVED v2.30]: "matching exactly" only
+true after v2.30, not v2.29.
+NS-5: v2.30 changelog line-number citations removed; replaced with relational descriptions.
+
+\---
+
+v2.32
+Contract declaration renamed: NearestTheETH30\_Base -> BullsEth.
+BullsBNB and BullsBTC forks: NearestTheBNB30\_BSC -> BullsBNB, NearestTheBTC30\_Arb -> BullsBTC.
+On-chain verified name now matches brand name on all three contracts.
+
+\---
+
+v2.33
+NS-01 (L): v2.32 header changelog entry was absent despite @title and getContractVersion()
+both reporting v2.32. The cosmetic rename (NearestTheETH30\_Base -> BullsEth) was the only
+change from v2.31. Zero bytecode change. Entry added.
+NS-02 (I): Constructor @notice said "Deploys BullsEth\_NoAave" -- stale from v1.52 Aave
+removal. Updated to "Deploys BullsEth (pure USDC, no Aave dependency)." Zero logic change.
+Status: Independent cold-read audit confirmed 0C/0H/0M before these fixes. Only NS-01 and
+NS-02 required action. All major code paths verified clean independently:
+no-Aave removal complete, v2.30 SSoT holds, v2.27 B-1 grossEquiv present in both pool
+paths, v1.98 F1 totalOGPrincipal symmetry correct. 0C/0H/0M/0L/0NS/0IC.
+---
+
+v2.34
+C-01 (CRITICAL): pruneStaleOGs() declared external but called internally from
+performUpkeep() action 3 (bare JUMP call to external function = compile error).
+Present since v1.55 when action 3 was added; survived all prior passes because no
+forge build was run in any session. Fix: external -> public. Internal JUMP call to
+public function preserves msg.sender so the owner/forwarder auth check inside
+pruneStaleOGs passes correctly. Lesson: compile before Cyfrin submission.
+M-01 (MEDIUM): 2-ticket casuals had prediction2 silently dropped at matching time
+if not submitted. OG matching loop always auto-fills both predictions. Non-OG loop
+only used prediction2 if explicitly submitted and fresh. applyAutoPicksForDraw()
+shows intent was always two entries for two-ticket players -- the matching loop gap
+was unintentional. Fix: non-OG matching loop now mirrors OG path: auto-default
+applied to prediction2 for all lastTicketCount>=2 casuals. Deterministic across
+mismatch resubmission passes.
+L-01 (LOW): withdrawTreasury() unlocked during PREGAME. requiredEndPot is 0 before
+startGame() so the pot<floor gate (prizePot < requiredEndPot) never fires in PREGAME.
+Two refund backstops (claimSignupRefund, cancelOGRegistration) rely on treasuryBalance
+during PREGAME. Fix: unconditional PREGAME revert added before the existing gate.
+L-02 (LOW): claimCommitmentRefund() decremented p.totalPaid by NET claim amount.
+totalPaid tracks GROSS throughout. Same family as v2.27 B-1. Fix: grossEquiv
+computed (claim \* 10000 / (10000 - TREASURY\_BPS)) with floor-to-zero pattern,
+consistent with all other decrement sites.
+Independent cold-read re-audit: 0C/0H/0M confirmed after fixes. All v2.27-v2.31
+fixes re-verified clean. I-01 through I-04 deferred to v2.35.
+
+\---
+
+v2.35
+NS-only pass. Zero bytecode change from v2.34.
+CL-L-01: v2.34 changelog falsely claimed "I-01 through I-04: see inline NatSpec
+additions." None had landed. Corrected to "deferred to v2.35." Applied v2.02
+honesty pattern.
+CL-L-02: v2.33 entry was missing from changelog. v2.33 existed and made NS changes
+(NS-01 missing v2.32 header entry, NS-02 stale constructor @notice). Entry added.
+CL-I-01: v2.32 "all major code paths verified clean" annotation corrected. The
+subsequent cold-read found 1C/0H/1M/2L/4I in that same code (fixed in v2.34).
+Annotation added consistent with v2.29 CORRECTION entry pattern.
+NS-L-01: withdrawTreasury() @dev now documents v2.34 PREGAME revert condition.
+NS-L-02: submitPrediction2() @notice corrected from "(OGs only)" to "(OGs and players
+who bought 2 tickets this draw)." Post-M-01, "(OGs only)" would cause frontends to
+hide the function from 2-ticket casuals, routing every casual second prediction to
+auto-default and defeating M-01 in production.
+I-1: pruneStaleOGs() inline @dev: do NOT add nonReentrant. performUpkeep() holds
+the guard when it calls in (action 3); the internal JUMP shares guard state so
+nonReentrant on pruneStaleOGs would revert every automation action 3 call.
+I-01 (WORST-CASE #6): Emergency reset during DISTRIBUTING phase documented. Winners
+already credited before reset keep prizes AND receive reset refunds. Accounting
+solvent throughout (credited amounts deducted from tierPools before reset). Asymmetric
+outcome for partially-distributed voided draw. Design decision, not a vulnerability.
+I-02: dormancyParticipantCount @dev sizing note added. Counter uses OG counters not
+ogList.length; status-lost OGs re-buying as casuals not double-counted in per-head maths.
+I-03: buyTickets single-credit branch note: committedDoubleCount deferred-clear
+documented. Dormancy over-reserve direction (over not under) confirmed and noted.
+I-04/NS-I-01 (LOAD-BEARING): ENTRY ENUMERATION RULES block added to keeper workflow
+NatSpec in getRequiredCutoffDiffBounds(). Documents post-v2.34 rules: OGs always
+2 entries with auto-default fill; casuals 1 or 2 entries per lastTicketCount with
+auto-default fill for both. Keeper enumerating entries without these rules will
+produce MatchCountMismatch on every honest submission.
+NS-I-03: AutoPrediction2Applied @dev lists all three emit sites. Not OG-exclusive
+post v2.34 M-01. Subgraphs inferring OG status from this event must be updated.
+Status: 0C/0H/0M/0L/0NS/0IC. Submission-ready.
+
